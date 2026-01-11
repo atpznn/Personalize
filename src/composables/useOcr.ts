@@ -6,19 +6,20 @@ export function useOCR() {
   const ocrText = ref('');
   const confidence = ref(0);
   const isRecognizing = ref(false);
-  const worker = ref(null);
+  const worker = ref<Tesseract.Worker|null>(null);
 const isProcessing = ref(false)
   // เริ่มต้นสร้าง Worker (แนะนำให้รันครั้งเดียวตอน mounted)
   const initOCR = async (lang = 'tha+eng',) => {
     worker.value = await createWorker(lang,1);
   };
 
-  const recognize = async (imageSource) => {
+  const recognize = async (imageSource:any) => {
     if (!worker.value) await initOCR('eng');
     
     isRecognizing.value = true;
     try {
       // imageSource รับได้ทั้ง URL, Base64, Blob หรือ HTMLCanvasElement
+      if(!worker.value)return ''
       const { data: { text, confidence: conf } } = await worker.value.recognize(imageSource);
       ocrText.value = text;
       confidence.value = conf;
