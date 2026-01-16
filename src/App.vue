@@ -153,7 +153,7 @@ const runLoop = async () => {
   }
   setTimeout(runLoop, 1000)
 }
-
+// https://github.com/tony-xlh/getUserMedia-demos/tree/main/focus
 const startCaptureLoop = () => {
   isLooping.value = true
   runLoop()
