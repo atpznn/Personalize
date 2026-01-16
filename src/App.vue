@@ -10,15 +10,15 @@
     </div>
 
     <div class="debug-panel">
-      <div class="debug-header">Debug View (Last Capture)</div>
+      <div class="debug-header">Debug View</div>
       <img v-if="debugImageUrl" :src="debugImageUrl" class="debug-preview" />
-      <div v-else class="debug-placeholder">No frame captured yet</div>
+      <div v-else class="debug-placeholder">No frame captured</div>
       
       <div class="debug-info">
-        <p>Resolution: {{ debugInfo.res }}</p>
+        <p>Res: {{ debugInfo.res }}</p>
         <p>Size: {{ debugInfo.size }} KB</p>
         <p>Last Sync: {{ debugInfo.time }}</p>
-        <p>{{ text }}</p>
+        <div class="result-text">{{ text }}</div>
       </div>
     </div>
 
@@ -28,120 +28,129 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted } from 'vue';
-import { useOCR } from './composables/useOcr';
-const ocr = useOCR()
-ocr.initOCR('eng')
 
-const videoRef = ref(null);
-const canvasRef = ref(null);
+// --- State ---
+const videoRef = ref<HTMLVideoElement | null>(null);
+const canvasRef = ref<HTMLCanvasElement | null>(null);
 const isProcessing = ref(false);
-const text = ref('')
-// State สำหรับ Debug
-const debugImageUrl = ref(null);
+const isLooping = ref(false);
+const text = ref('');
+
+const debugImageUrl = ref<string | null>(null);
 const debugInfo = reactive({
   res: '0x0',
-  size: 0,
+  size: '0',
   time: '-'
 });
 
-let stream = null;
-let intervalId = null;
+let stream: MediaStream | null = null;
+
+// --- Methods ---
+
 const initCamera = async () => {
   try {
     const constraints = {
       video: {
         facingMode: 'environment',
-        width: { min: 640, ideal: 1920, max: 1920 }, 
-        height: { min: 480, ideal: 1080, max: 1080 },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
       },
       audio: false
     };
 
     stream = await navigator.mediaDevices.getUserMedia(constraints);
-    
     if (videoRef.value) {
       videoRef.value.srcObject = stream;
-      const track = stream.getVideoTracks()[0];
-      const capabilities = track.getCapabilities();
-      const advancedConstraints: any = {};
       
-      if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
-        advancedConstraints.focusMode = 'continuous';
-      }
-
-      // ถ้าต้องการพยายามสั่งเปิดไฟ Flash หรือตั้งค่าอื่นๆ เพิ่มเติม (ถ้ามี)
-      if (Object.keys(advancedConstraints).length > 0) {
+      const track = stream.getVideoTracks()[0];
+      const capabilities: any = track.getCapabilities();
+      if (capabilities.focusMode?.includes('continuous')) {
         await track.applyConstraints({
-          advanced: [advancedConstraints]
+          advanced: [{ focusMode: 'continuous' } as any]
         });
       }
     }
-    
     startCaptureLoop();
   } catch (err) {
-    console.error("Camera Error:", err);
-    alert("ไม่สามารถเปิดกล้องได้: " + err);
+    alert("Camera Error: " + err);
   }
 };
-const captureFrame = async () => {
-  clearInterval(intervalId);
 
-  if (!videoRef.value || !canvasRef.value || isProcessing.value) return;
+const captureSingleFrame = (): Promise<Blob | null> => {
+  return new Promise((resolve) => {
+    if (!videoRef.value || !canvasRef.value) return resolve(null);
 
-  const video = videoRef.value;
-  const canvas = canvasRef.value;
-  const context = canvas.getContext('2d');
+    const video = videoRef.value;
+    const canvas = canvasRef.value;
+    const context = canvas.getContext('2d');
 
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    if (!context || video.videoWidth === 0) return resolve(null);
 
-  // ดึงภาพออกมาโชว์ใน Debug View (Base64 เพื่อแสดงผลทันที)
-  const previewData = canvas.toDataURL('image/jpeg', 0.5);
-  debugImageUrl.value = previewData;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-  // แปลงเป็น Blob เพื่อส่งจริงและวัดขนาดไฟล์
-  canvas.toBlob(async (blob) => {
-    if (blob) {
-      // อัปเดต Debug Info
-      debugInfo.res = `${canvas.width}x${canvas.height}`;
-      debugInfo.size = (blob.size / 1024).toFixed(2);
-      debugInfo.time = new Date().toLocaleTimeString();
-try{
-  await sendToServer(blob);
-}
-finally{ 
-  startCaptureLoop()
-}
-    }
-  }, 'image/jpeg', 0.7);
+    canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.7);
+  });
 };
 
-const sendToServer = async (imageBlob) => {
+const sendToServer = async (imageBlob: Blob) => {
   isProcessing.value = true;
   try {
-    // จำลองการส่ง
-    text.value    = await ocr.recognize(imageBlob)
-    // await new Promise(resolve => setTimeout(resolve, 400)); 
-    console.log("Frame sent successfully");
-  }catch(ex){
-    alert('send '+ex)
+    const formData = new FormData();
+    formData.append("images", imageBlob, "frame.jpg");
+
+    const response = await fetch('https://itg-go.onrender.com/ocr-single-safe', {
+      method: 'POST',
+      body: formData
+    });
+    
+    const data = await response.json();
+    text.value = data.results?.[0] || 'No text found';
+  } catch (ex) {
+    console.error('API Error:', ex);
   } finally {
     isProcessing.value = false;
   }
 };
 
-const startCaptureLoop = () => {
-  intervalId = setInterval(captureFrame, 1000);
-};
-const stopCaptureLoop = ()=>{
-  clearInterval(intervalId);
+const runLoop = async () => {
+  if (!isLooping.value) return;
 
-}
+  const blob = await captureSingleFrame();
+
+  if (blob && !isProcessing.value) {
+    // Update Debug UI
+    if (debugImageUrl.value) URL.revokeObjectURL(debugImageUrl.value);
+    debugImageUrl.value = URL.createObjectURL(blob);
+    
+    debugInfo.res = `${canvasRef.value?.width}x${canvasRef.value?.height}`;
+    debugInfo.size = (blob.size / 1024).toFixed(2);
+    debugInfo.time = new Date().toLocaleTimeString();
+
+    // OCR Request
+    await sendToServer(blob);
+  }
+
+  // เมื่อทุกอย่างเสร็จ (หรือข้าม) รอ 1 วิแล้วเริ่มรอบใหม่
+  setTimeout(runLoop, 1000);
+};
+
+const startCaptureLoop = () => {
+  isLooping.value = true;
+  runLoop();
+};
+
+const stopCaptureLoop = () => {
+  isLooping.value = false;
+  if (debugImageUrl.value) URL.revokeObjectURL(debugImageUrl.value);
+};
+
+// --- Lifecycle ---
 onMounted(() => initCamera());
 onUnmounted(() => {
-  if (stream) stream.getTracks().forEach(t => t.stop());
-  stopCaptureLoop()
+  stopCaptureLoop();
+  stream?.getTracks().forEach(track => track.stop());
 });
 </script>
 
@@ -169,63 +178,63 @@ onUnmounted(() => {
 
 .status-badge {
   margin-top: 20px;
-  padding: 5px 12px;
-  background: rgba(0,0,0,0.7);
+  padding: 6px 16px;
+  background: rgba(0,0,0,0.75);
   color: #00ff00;
-  border-radius: 4px;
-  font-size: 12px;
+  border: 1px solid #00ff00;
+  border-radius: 20px;
+  font-size: 14px;
+  transition: all 0.3s;
+}
+
+.status-badge.is-active {
+  color: #ffcc00;
+  border-color: #ffcc00;
+  box-shadow: 0 0 10px rgba(255, 204, 0, 0.5);
 }
 
 .scan-frame {
   margin: auto;
   width: 80%;
-  height: 25%;
-  border: 1px solid rgba(255,255,255,0.3);
+  height: 20%;
+  border: 2px solid rgba(255,255,255,0.8);
   box-shadow: 0 0 0 1000px rgba(0,0,0,0.5);
+  border-radius: 8px;
 }
 
-/* --- DEBUG PANEL STYLE --- */
 .debug-panel {
   position: absolute;
   bottom: 20px;
   right: 20px;
-  width: 150px;
-  background: rgba(0, 0, 0, 0.85);
-  border: 1px solid #444;
-  border-radius: 8px;
-  padding: 8px;
+  width: 180px;
+  background: rgba(0, 0, 0, 0.9);
+  border: 1px solid #333;
+  border-radius: 12px;
+  padding: 10px;
   color: #fff;
-  font-family: monospace;
-  font-size: 10px;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 11px;
   z-index: 100;
 }
 
 .debug-header {
-  border-bottom: 1px solid #444;
-  margin-bottom: 5px;
-  padding-bottom: 3px;
-  color: #aaa;
+  font-weight: bold;
+  margin-bottom: 8px;
+  color: #00ff00;
+  text-transform: uppercase;
 }
 
 .debug-preview {
   width: 100%;
-  height: auto;
   border-radius: 4px;
-  margin-bottom: 5px;
-  border: 1px solid #555;
+  margin-bottom: 8px;
 }
 
-.debug-placeholder {
-  height: 80px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #222;
-  color: #555;
-  text-align: center;
-}
-
-.debug-info p {
-  margin: 2px 0;
+.result-text {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #444;
+  color: #00ffcc;
+  word-break: break-all;
 }
 </style>
