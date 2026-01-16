@@ -134,6 +134,7 @@ const sendToServer = async (blob: Blob) => {
     text.value = data.results?.[0] || 'No text'
   } catch (e) {
     console.error(e)
+    text.value = `error ${e}`
   } finally {
     isProcessing.value = false
   }
